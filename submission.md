@@ -416,32 +416,22 @@ flowchart LR
 
 ## Git commit history (`bugfix/mixtape`)
 
-Course Portal has no separate screenshot upload field, so the screenshot is included in this file on the `bugfix/mixtape` branch.
+Course Portal has no separate screenshot upload field, so the screenshot is embedded below (GitHub-hosted URL — no PNG file in the repo).
 
 ### Screenshot
 
-<!-- Save terminal screenshot as docs/git-log-bugfix-mixtape.png then commit on bugfix/mixtape -->
-
-![git log --oneline on bugfix/mixtape](docs/git-log-bugfix-mixtape.png)
-<img width="985" height="174" alt="image" src="https://github.com/user-attachments/assets/7b7c8ae8-b40e-48ba-b30d-8789341efed3" />
+<img width="985" height="174" alt="git log on bugfix/mixtape" src="https://github.com/user-attachments/assets/7b7c8ae8-b40e-48ba-b30d-8789341efed3" />
 
 ### Monospace copy (for graders / search)
 
 ```text
-$ git checkout bugfix/mixtape
-$ git log --oneline
+$ git log --oneline origin/main..bugfix/mixtape
 
+20328a5 docs: add embedded git-log screenshot slot in submission.md
 f93fd50 docs: complete RCAs, git log, and demo script in submission.md
 e6c2131 fix: notify song sharer when a friend rates their song
 110145c fix: return all playlist songs instead of slicing off the last one
 ca08670 fix: allow streak increment on Sunday after consecutive day
-b1018af docs: draft pre-fix submission from observation captures
-9901cc3 docs: add Mermaid diagrams for workflow and bug investigation
-2bf5010 docs: add pre-fix submission draft before bug fixes
-1e1215b feat: bind Flask dev server to all network interfaces
-6213062 codepath ai201 unit 5 projects ; 17K 2026-07-01 01:03:51.852849000 -0600 projects.md
-2dfdeaa Add .gitignore file and update README with setup instructions
-7b64551 initial commit
 ```
 
 **Three `fix:` commits** (one per bug): `ca08670`, `110145c`, `e6c2131`.
