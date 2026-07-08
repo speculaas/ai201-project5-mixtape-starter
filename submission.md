@@ -423,6 +423,7 @@ Course Portal has no separate screenshot upload field, so the screenshot is incl
 <!-- Save terminal screenshot as docs/git-log-bugfix-mixtape.png then commit on bugfix/mixtape -->
 
 ![git log --oneline on bugfix/mixtape](docs/git-log-bugfix-mixtape.png)
+<img width="985" height="174" alt="image" src="https://github.com/user-attachments/assets/7b7c8ae8-b40e-48ba-b30d-8789341efed3" />
 
 ### Monospace copy (for graders / search)
 
