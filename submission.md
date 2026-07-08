@@ -416,12 +416,21 @@ flowchart LR
 
 ## Git commit history (`bugfix/mixtape`)
 
-The project brief asks for a **screenshot** of this output attached to the Course Portal submission. The copy below is included for readability in `submission.md`; still take a screenshot of your terminal for the portal.
+Course Portal has no separate screenshot upload field, so the screenshot is included in this file on the `bugfix/mixtape` branch.
+
+### Screenshot
+
+<!-- Save terminal screenshot as docs/git-log-bugfix-mixtape.png then commit on bugfix/mixtape -->
+
+![git log --oneline on bugfix/mixtape](docs/git-log-bugfix-mixtape.png)
+
+### Monospace copy (for graders / search)
 
 ```text
 $ git checkout bugfix/mixtape
 $ git log --oneline
 
+f93fd50 docs: complete RCAs, git log, and demo script in submission.md
 e6c2131 fix: notify song sharer when a friend rates their song
 110145c fix: return all playlist songs instead of slicing off the last one
 ca08670 fix: allow streak increment on Sunday after consecutive day
