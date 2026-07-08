@@ -42,6 +42,16 @@ Routes are thin; services hold the logic. Example: `GET /playlists/<id>/songs` �
 2. → creates `ListeningEvent`, calls `update_listening_streak(user, now)`
 3. → updates `user.listening_streak` and `user.last_listened_at`
 
+### Diagrams
+
+See [`docs/diagrams.md`](docs/diagrams.md) for Mermaid figures covering:
+
+- Project workflow and architecture (codebase map support)
+- Per-bug investigation flows for all five issues
+- RCA structure and commit model
+
+GitHub renders these in the Markdown preview. Keep the **written RCA prose** in this file as the graded explanation; use diagrams to support, not replace, it.
+
 ---
 
 ## Pre-Fix Observations (baseline, before any service edits)
