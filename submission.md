@@ -1,15 +1,14 @@
 # Mixtape Bug Hunt — Submission
 
-> **Status:** Pre-fix observations only. Root cause analyses and fix commits go below after each bug is fixed.
+> **Status:** Pre-fix observations and diagnosis complete. Root cause analysis *fix verification* sections pending until after each `fix:` commit on `bugfix/mixtape`.
 
 ---
 
 ## AI Usage
 
-*(Fill in after project — describe how you used AI for orientation, explanation, and debugging. Note where you verified or overrode AI output.)*
-
-- Used Cursor to:
-- Verified myself:
+- **Cursor:** Helped orient the repo, run `capture-observations.sh`, interpret pytest failures, and draft this submission structure. Suggested where bugs likely live based on tests and docstrings.
+- **Microsoft Copilot (BookClub Tinker thread):** Provided the debugging workflow — trace route → service → model, treat tests as contracts, diagnose before fixing, use Mermaid for fault-isolation and contract-mismatch diagrams ([dialogue export](https://github.com/)).
+- **Verified myself:** Ran `pytest tests/ -v` (3 failed, 10 passed), read `streak_service.py` and `playlist_service.py` to confirm docstring-vs-code mismatches, and reproduced Issue #5 over HTTP from a second machine (`05-remote-http-repro.txt`).
 
 ---
 
@@ -30,54 +29,50 @@
 
 Routes are thin; services hold the logic. Example: `GET /playlists/<id>/songs` → `routes/playlists.py` → `playlist_service.get_playlist_songs()`.
 
-### Data flow example — song added to playlist + notification
+### Architecture (route → service → model)
+
+```mermaid
+flowchart TD
+    Client["Client / curl / pytest"] --> Routes["routes/*.py"]
+    Routes --> Services["services/*.py"]
+    Services --> Models["models.py"]
+    Models --> DB[(SQLite mixtape.db)]
+    Seed[seed_data.py] --> DB
+    Tests[tests/*.py] --> Services
+```
+
+### Data flow — song added to playlist + notification
 
 1. `POST /playlists/<playlist_id>/songs` (`routes/playlists.py`)
 2. → `notification_service.add_to_playlist()`
 3. → adds song to playlist; if adder ≠ sharer, `create_notification()` with type `song_added_to_playlist`
 
-### Data flow example — listening streak
+### Data flow — listening streak
 
 1. `POST /songs/<song_id>/listen` → `streak_service.record_listening_event()`
 2. → creates `ListeningEvent`, calls `update_listening_streak(user, now)`
 3. → updates `user.listening_streak` and `user.last_listened_at`
 
-### Diagrams
-
-See [`docs/diagrams.md`](docs/diagrams.md) for Mermaid figures covering:
-
-- Project workflow and architecture (codebase map support)
-- Per-bug investigation flows for all five issues
-- RCA structure and commit model
-
-GitHub renders these in the Markdown preview. Keep the **written RCA prose** in this file as the graded explanation; use diagrams to support, not replace, it.
+Additional diagrams: [`docs/diagrams.md`](docs/diagrams.md)
 
 ---
 
-## Pre-Fix Observations (baseline, before any service edits)
+## Evidence baseline (captured before service edits)
 
-**Captured:** 2026-07-07  
-**Evidence files:** `../observations/` — regenerate with `../capture-observations.sh`  
-**pytest baseline:** 3 failed, 10 passed  
-**Branch:** `bugfix/mixtape` *(create before first fix)*
+| Artifact | Result |
+|----------|--------|
+| `pytest tests/ -v` | **3 failed, 10 passed** (see `observations/01-pytest-baseline.txt`) |
+| Local API (test client) | `observations/02-api-repro.txt` |
+| Remote HTTP (laptop → Mac mini) | `observations/05-remote-http-repro.txt` |
+| Seed IDs | `observations/00-seed-ids.txt` |
 
-**Current seed IDs (2026-07-07):**
+**pytest failures:** `test_streak_increments_on_sunday`, `test_playlist_returns_all_songs`, `test_playlist_returns_songs_in_order`
 
-| username | id |
-|----------|-----|
-| nova | `07e44d55-6f84-450b-a01b-2e79ebe9a5c5` |
-| darius | `4c52bbd2-5a12-4a3e-a959-9112c19b9a60` |
-| Late Night Vibes playlist | `588519f8-e0d4-44c4-b5ba-7d0bf09dc95a` (7 songs in DB) |
-
-### Chosen bugs (plan: fix at least 3)
-
-| Issue | Title | Service | Repro method |
-|-------|-------|---------|--------------|
-| #1 | Listening streak keeps resetting | `streak_service.py` | pytest (Sunday case) |
-| #5 | Last song in playlist never shows up | `playlist_service.py` | pytest + HTTP |
-| #2 / #3 / #4 | *(pick third)* | `feed` / `search` / `notification` | HTTP + code trace |
+**Chosen bugs to fix (≥3):** #1 streak, #5 playlist, plus #4 notifications (third — clear HTTP/code comparison path).
 
 ---
+
+## Pre-Fix Observations & Diagnosis
 
 ### Issue #1 — Listening streak keeps resetting
 
@@ -89,36 +84,51 @@ source .venv/bin/activate
 pytest tests/test_streaks.py::test_streak_increments_on_sunday -v
 ```
 
-#### Observed behavior
+#### Observed vs expected
 
-- After `update_listening_streak` on Saturday 2024-06-15, streak = 1 (correct).
-- After listening again on Sunday 2024-06-16 (one calendar day later), streak stays **1**.
-- Test failure: `assert 1 == 2`.
+| | |
+|---|---|
+| **Observed** | Saturday listen → streak 1. Sunday listen (next calendar day) → streak stays **1**. Failure: `assert 1 == 2`. |
+| **Expected** | Consecutive calendar days increment streak (Saturday → Sunday → **2**). |
+| **Trigger** | `days_since_last == 1` on a **Sunday** (`today.weekday() == 6`). |
 
-#### Expected behavior
+#### Call chain
 
-- Consecutive **calendar days** should increment the streak (Saturday → Sunday → streak 2).
-- Docstring in `update_listening_streak()` promises: listened yesterday → increment; same day → no change; skipped day → reset.
+```mermaid
+flowchart TD
+    A["POST /songs/{song_id}/listen"] --> B["routes/songs.py listen()"]
+    B --> C["streak_service.record_listening_event()"]
+    C --> D["create ListeningEvent"]
+    C --> E["update_listening_streak(user, now)"]
+    E --> F{"days_since_last = (today - last_date).days"}
+    F -->|0| G["no change"]
+    F -->|1 and weekday != 6| H["streak += 1"]
+    F -->|else| I["streak = 1"]
+    J["Sat → Sun: days_since_last = 1"] --> F
+    F -->|Sunday fails weekday check| I
+    I --> K["BUG: streak reset instead of increment"]
+```
 
-#### Trigger condition
+#### Contract vs implementation
 
-- `days_since_last == 1` **and** `today.weekday() == 6` (Sunday).
+```mermaid
+flowchart LR
+    A["Docstring contract:<br/>consecutive calendar days increment streak"] --> C{"Implementation honors<br/>calendar-day difference only?"}
+    B["Code line 73:<br/>days_since_last == 1 AND weekday != 6"] --> C
+    C -->|No| D["Sunday + yesterday listen<br/>falls through to reset branch"]
+    D --> E["Diagnosis: weekday guard blocks<br/>valid consecutive-day increment"]
+```
 
-#### Call chain traced
+#### Pre-fix diagnosis (before editing)
 
-| Step | Location | Notes |
-|------|----------|-------|
-| 1 | `tests/test_streaks.py` | Calls `update_listening_streak` directly |
-| 2 | `services/streak_service.py` → `update_listening_streak()` | Computes `days_since_last`, branches on streak rules |
-
-#### Docstring vs code (before fix)
-
-- **Docstring:** consecutive calendar days; yesterday → increment.
-- **Code:** still reading — look for date arithmetic vs `weekday()` checks.
-
-#### Hypothesis (before fix)
-
-- Streak logic may treat Sunday differently from other consecutive days (weekday-based check instead of pure calendar-day difference).
+| | |
+|---|---|
+| **Docstring says** | Yesterday → increment; same day → no change; skip → reset. Based on **calendar days**. |
+| **Code does** | Computes `days_since_last` correctly, but only increments when `today.weekday() != 6`. |
+| **Mismatch** | Line 73 treats Sunday as a special case incompatible with the Saturday→Sunday test. |
+| **Bug location** | `services/streak_service.py` line 73 |
+| **Planned fix** | Increment whenever `days_since_last == 1`; remove weekday check. |
+| **Verify** | `pytest tests/test_streaks.py -v` (all 5 pass) |
 
 ---
 
@@ -132,115 +142,200 @@ pytest tests/test_streaks.py::test_streak_increments_on_sunday -v
 pytest tests/test_playlists.py -v
 ```
 
-**HTTP (after `python seed_data.py`; use IDs from `observations/00-seed-ids.txt`):**
+**HTTP (remote laptop → `http://10.88.191.102:5000`):**
 
 ```bash
-curl "http://127.0.0.1:5000/playlists/<LATE_NIGHT_VIBES_ID>/songs"
+curl "http://10.88.191.102:5000/playlists/588519f8-e0d4-44c4-b5ba-7d0bf09dc95a/songs"
 ```
 
-#### Observed behavior
+Evidence: `observations/05-remote-http-repro.txt`
 
-- pytest: 5-song test playlist returns **4** songs; titles end at `Track 4` (missing `Track 5`).
-- HTTP (seeded "Late Night Vibes", 7 songs in DB): API `"count": 6` — one fewer than stored.
+#### Observed vs expected
 
-#### Expected behavior
+| | |
+|---|---|
+| **pytest** | 5-song playlist returns **4** songs; titles `Track 1`…`Track 4` (missing `Track 5`). |
+| **HTTP** | "Late Night Vibes" has **7** songs in DB; API `"count": 6`. Last song ("Free Throws" / position 7) missing. |
+| **Expected** | Count matches all `playlist_entries` rows; ordered by `position`. |
+| **Trigger** | Any playlist with ≥1 song; **last** entry always dropped. |
 
-- All songs in playlist order; count matches number of `playlist_entries` rows.
+#### Call chain
 
-#### Trigger condition
+```mermaid
+flowchart TD
+    A["GET /playlists/{id}/songs"] --> B["routes/playlists.py get_songs()"]
+    B --> C["playlist_service.get_playlist_songs()"]
+    C --> D["JOIN playlist_entries ORDER BY position"]
+    D --> E["songs = query.all()  → N rows"]
+    E --> F["return songs[:-1]"]
+    F --> G["API count = N - 1"]
+    G --> H["BUG: last song missing"]
+```
 
-- Any playlist with ≥1 song; **last** song consistently omitted.
+#### Contract vs implementation
 
-#### Call chain traced
+```mermaid
+flowchart LR
+    A["Docstring + test contract:<br/>return ALL songs in playlist order"] --> C{"Return length == query length?"}
+    B["Code line 66:<br/>songs[:-1]"] --> C
+    C -->|No| D["Last element sliced off every time"]
+    D --> E["Diagnosis: off-by-one in return,<br/>not in SQL query"]
+```
 
-| Step | Location | Notes |
-|------|----------|-------|
-| 1 | `GET /playlists/<id>/songs` | `routes/playlists.py` |
-| 2 | `playlist_service.get_playlist_songs()` | Queries songs ordered by `position` |
-| 3 | Return value | Compare row count vs length of returned list |
+#### Pre-fix diagnosis (before editing)
 
-#### Docstring vs code (before fix)
-
-- **Docstring:** "returns all songs in the playlist."
-- **Code:** still reading — check whether return statement slices the list.
-
-#### Hypothesis (before fix)
-
-- Off-by-one or slice on the final element drops the last song after a correct query.
+| | |
+|---|---|
+| **Docstring says** | Returns all songs in playlist order. |
+| **Code does** | Query is correct; return uses `songs[:-1]`. |
+| **Mismatch** | Line 66 excludes the final song after a successful query. |
+| **Bug location** | `services/playlist_service.py` line 66 |
+| **Planned fix** | Return `songs` without `[:-1]`. |
+| **Verify** | `pytest tests/test_playlists.py -v`; re-curl playlist endpoint (expect count 7). |
 
 ---
 
-### Issue #3 — Same song shows up twice in search *(conditional — investigate)*
+### Issue #3 — Same song shows up twice in search *(not reproduced on baseline)*
 
 #### How I reproduced it
 
 ```bash
-curl "http://127.0.0.1:5000/songs/search?q=Crown"
+curl "http://10.88.191.102:5000/songs/search?q=Crown"
 ```
 
-#### Observed behavior (baseline)
+#### Observed vs expected
 
-- `Crown Heights Anthem` (3 tags) appears **once** in API results; search unit tests **pass**.
-- Bug may be conditional per project hint — needs more investigation before fix.
+| | |
+|---|---|
+| **Observed** | `Crown Heights Anthem` (3 tags) appears **once**; `"count": 1`. All `test_search.py` tests **pass**. |
+| **Expected (per test comment)** | Multi-tag song should appear exactly once — bug comment says it *would* appear 3× without fix. |
+| **Status** | Conditional / latent — investigate join before fixing. |
 
-#### Expected behavior
+#### Fault-isolation diagram
 
-- Each song appears once regardless of tag count.
+```mermaid
+flowchart TD
+    A["Multi-tag song has 3 tag rows"] --> B["search_songs outerjoins song_tags"]
+    B --> C["Raw SQL can return 3 rows per song"]
+    C --> D{"SQLAlchemy query(Song).all()<br/>deduplicates by primary key?"}
+    D -->|Yes| E["Current tests + HTTP pass"]
+    D -->|No / other code path| F["Duplicate results in API"]
+    E --> G["Still inspect join — unnecessary<br/>and risky if query shape changes"]
+```
 
-#### Notes
+#### Pre-fix diagnosis
 
-- Inspect `search_service.py` join on `song_tags`; compare raw SQL row count vs ORM result count.
+- `search_service.py` joins `song_tags` but only filters on title/artist — join may be dead code or latent duplicate source.
+- **Not chosen as primary fix target** until reproduced; may fix defensively if time permits.
 
 ---
 
-### Issue #2 — Friends Listening Now shows stale listeners *(to investigate)*
+### Issue #2 — Friends Listening Now shows people from yesterday
 
 #### How I reproduced it
 
 ```bash
-curl "http://127.0.0.1:5000/feed/<NOVA_USER_ID>/listening-now"
+curl "http://10.88.191.102:5000/feed/07e44d55-6f84-450b-a01b-2e79ebe9a5c5/listening-now"
 ```
 
-#### Observed behavior (baseline)
+Evidence: `observations/05-remote-http-repro.txt` — `"count": 3`
 
-- Returns friends with recent `listened_at` timestamps (see `observations/02-api-repro.txt`).
-- Compare each `listened_at` to 24-hour cutoff in `feed_service.RECENT_THRESHOLD`.
+#### Observed vs expected
 
-#### Expected behavior
+| | |
+|---|---|
+| **Observed** | 3 friends returned; e.g. darius `listened_at` ~20 min ago (within 24h window). |
+| **Expected (issue brief)** | "Listening **Now**" should not show yesterday's listeners. |
+| **Investigation** | `feed_service.RECENT_THRESHOLD = timedelta(hours=24)` may be too wide for "now". |
 
-- Only friends who listened within the last 24 hours.
+#### Threshold diagram
+
+```mermaid
+flowchart TD
+    A["get_friends_listening_now()"] --> B["cutoff = now - 24 hours"]
+    B --> C["Friend listened yesterday<br/>but within 24h"]
+    C --> D["Event passes filter"]
+    D --> E["Appears in Listening Now"]
+    E --> F["Product mismatch:<br/>24h window ≠ 'now'"]
+```
+
+#### Pre-fix diagnosis
+
+- Need project brief's intended window (e.g. 1 hour vs same calendar day).
+- **Backup third bug** if #4 is fixed first.
 
 ---
 
-### Issue #4 — Missing rating notification *(to investigate)*
+### Issue #4 — Missing notification when friend rates song
 
 #### How I reproduced it
 
 ```bash
-curl "http://127.0.0.1:5000/users/<NOVA_USER_ID>/notifications"
+curl "http://10.88.191.102:5000/users/07e44d55-6f84-450b-a01b-2e79ebe9a5c5/notifications"
 ```
 
-#### Observed behavior (baseline)
+#### Observed vs expected
 
-- One notification: `song_added_to_playlist` (darius added Midnight Drive).
-- No `song_rated` notification present.
+| | |
+|---|---|
+| **Observed** | 1 notification: `song_added_to_playlist` (darius added Midnight Drive). |
+| **Expected** | When a friend rates your shared song, sharer gets `song_rated` notification. |
+| **Next step** | `POST /songs/<song_id>/rate` as darius; re-check notifications. |
 
-#### Expected behavior
+#### Working vs broken path
 
-- When a friend rates your shared song, sharer receives a notification (mirror `add_to_playlist` pattern).
+```mermaid
+flowchart TD
+    subgraph Works
+        A1["POST /playlists/.../songs"] --> B1["add_to_playlist()"]
+        B1 --> C1["create_notification()"]
+        C1 --> D1["song_added_to_playlist ✅"]
+    end
+    subgraph Broken
+        A2["POST /songs/.../rate"] --> B2["rate_song()"]
+        B2 --> C2["save Rating"]
+        C2 --> D2["No create_notification()"]
+        D2 --> E2["Missing song_rated ❌"]
+    end
+```
 
-#### Next repro step
+#### Pre-fix diagnosis
 
-- `POST /songs/<song_id>/rate` as friend user; re-check notifications.
+- Compare `rate_song()` to `add_to_playlist()` — working path notifies sharer; rating path does not.
+- **Chosen as third fix** — architectural pattern mismatch, not a one-character typo.
 
 ---
 
-## Root Cause Analyses
+## Root Cause Analyses (complete after each fix)
 
-*(Add one section per bug after fixing — all 5 fields per `projects.md`.)*
+*Template: issue title → reproduction → navigation → root cause → fix + side effects. Add Mermaid only if it clarifies. Fill in **Verified** rows after committing.*
 
-### Issue #1 — *(pending)*
+### Issue #1 — Listening streak keeps resetting
 
-### Issue #5 — *(pending)*
+| Field | Content |
+|-------|---------|
+| **Reproduction** | *(copy from Pre-Fix Observations above)* |
+| **Navigation** | `test_streaks.py` → `update_listening_streak()` |
+| **Root cause** | *(confirm after fix commit)* |
+| **Fix & side effects** | *(fill after `fix:` commit + full streak test suite)* |
+| **Verified** | ☐ `pytest tests/test_streaks.py` all pass |
 
-### Issue #3 / #2 / #4 — *(pending — pick third bug)*
+### Issue #5 — Last song in playlist never shows up
+
+| Field | Content |
+|-------|---------|
+| **Reproduction** | pytest + HTTP count 6 vs DB 7 |
+| **Navigation** | `routes/playlists.py` → `get_playlist_songs()` line 66 |
+| **Root cause** | *(confirm after fix commit)* |
+| **Fix & side effects** | *(fill after commit)* |
+| **Verified** | ☐ `pytest tests/test_playlists.py` all pass |
+
+### Issue #4 — Missing rating notification
+
+| Field | Content |
+|-------|---------|
+| **Reproduction** | *(fill after POST rate repro)* |
+| **Navigation** | `routes/songs.py` → `rate_song()` vs `add_to_playlist()` |
+| **Root cause** | *(pending)* |
+| **Fix & side effects** | *(pending)* |
+| **Verified** | ☐ notification appears after friend rates song |
