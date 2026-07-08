@@ -1,14 +1,14 @@
 # Mixtape Bug Hunt — Submission
 
-> **Status:** Pre-fix observations and diagnosis complete. Root cause analysis *fix verification* sections pending until after each `fix:` commit on `bugfix/mixtape`.
+> **Status:** Three bugs fixed on `bugfix/mixtape`. RCAs complete. Ready for portal submit after `git log` screenshot.
 
 ---
 
 ## AI Usage
 
-- **Cursor:** Helped orient the repo, run `capture-observations.sh`, interpret pytest failures, and draft this submission structure. Suggested where bugs likely live based on tests and docstrings.
-- **Microsoft Copilot (BookClub Tinker thread):** Provided the debugging workflow — trace route → service → model, treat tests as contracts, diagnose before fixing, use Mermaid for fault-isolation and contract-mismatch diagrams ([dialogue export](https://github.com/)).
-- **Verified myself:** Ran `pytest tests/ -v` (3 failed, 10 passed), read `streak_service.py` and `playlist_service.py` to confirm docstring-vs-code mismatches, and reproduced Issue #5 over HTTP from a second machine (`05-remote-http-repro.txt`).
+- **Cursor:** Oriented the repo, ran `capture-observations.sh`, applied fixes #1/#5/#4 on `bugfix/mixtape`, and drafted RCAs with Mermaid diagrams.
+- **Microsoft Copilot (BookClub Tinker thread):** Debugging workflow — trace route → service → model, tests as contracts, diagnose before fixing, contract-mismatch diagrams.
+- **Verified myself:** Ran `pytest tests/ -v` before and after (3 failed → 13 passed); HTTP repro from laptop (`05-remote-http-repro.txt`); read service files to confirm docstring-vs-code mismatches before editing; manual script to verify `song_rated` notification after fix #4.
 
 ---
 
@@ -306,36 +306,151 @@ flowchart TD
 
 ---
 
-## Root Cause Analyses (complete after each fix)
-
-*Template: issue title → reproduction → navigation → root cause → fix + side effects. Add Mermaid only if it clarifies. Fill in **Verified** rows after committing.*
+## Root Cause Analyses
 
 ### Issue #1 — Listening streak keeps resetting
 
-| Field | Content |
-|-------|---------|
-| **Reproduction** | *(copy from Pre-Fix Observations above)* |
-| **Navigation** | `test_streaks.py` → `update_listening_streak()` |
-| **Root cause** | *(confirm after fix commit)* |
-| **Fix & side effects** | *(fill after `fix:` commit + full streak test suite)* |
-| **Verified** | ☐ `pytest tests/test_streaks.py` all pass |
+**1. Issue number and title:** #1 — Listening streak keeps resetting (`streak_service.py`)
+
+**2. How I reproduced it**
+
+```bash
+pytest tests/test_streaks.py::test_streak_increments_on_sunday -v
+```
+
+Saturday 2024-06-15 → streak 1. Sunday 2024-06-16 (one calendar day later) → streak stayed 1. Failure: `assert 1 == 2`.
+
+**3. How I found the root cause**
+
+- Read failing test in `tests/test_streaks.py` (Sunday boundary case).
+- Opened `services/streak_service.py` → `update_listening_streak()`.
+- Compared docstring (consecutive **calendar days**) to branch on line 73.
+- Confirmed `days_since_last` is computed correctly with `(today - last_date).days` — bug is not in date math but in the extra `weekday()` guard.
+
+**4. The root cause**
+
+Line 73 required `days_since_last == 1 and today.weekday() != 6`. On Sunday (`weekday() == 6`), listening after listening yesterday satisfied `days_since_last == 1` but failed the weekday check, falling through to `streak = 1` instead of incrementing. The docstring promises calendar-day streaks; the weekday check imposed an undocumented Sunday exception.
+
+**5. Fix and side-effect check**
+
+- **Change:** `elif days_since_last == 1:` (removed `and today.weekday() != 6`).
+- **Why it works:** Any exactly-one-day gap now increments, including Saturday→Sunday.
+- **Verified:** `pytest tests/test_streaks.py` — 5/5 pass. Full suite: 13/13 pass. Other streak cases (same day, skip day, consecutive weekday) unchanged.
+
+---
 
 ### Issue #5 — Last song in playlist never shows up
 
-| Field | Content |
-|-------|---------|
-| **Reproduction** | pytest + HTTP count 6 vs DB 7 |
-| **Navigation** | `routes/playlists.py` → `get_playlist_songs()` line 66 |
-| **Root cause** | *(confirm after fix commit)* |
-| **Fix & side effects** | *(fill after commit)* |
-| **Verified** | ☐ `pytest tests/test_playlists.py` all pass |
+**1. Issue number and title:** #5 — Last song in playlist never shows up (`playlist_service.py`)
 
-### Issue #4 — Missing rating notification
+**2. How I reproduced it**
 
-| Field | Content |
-|-------|---------|
-| **Reproduction** | *(fill after POST rate repro)* |
-| **Navigation** | `routes/songs.py` → `rate_song()` vs `add_to_playlist()` |
-| **Root cause** | *(pending)* |
-| **Fix & side effects** | *(pending)* |
-| **Verified** | ☐ notification appears after friend rates song |
+```bash
+pytest tests/test_playlists.py -v
+curl "http://10.88.191.102:5000/playlists/<playlist_id>/songs"
+```
+
+pytest: 5-song playlist returned 4 (`Track 1`…`Track 4`). HTTP: "Late Night Vibes" had 7 songs in DB; API `"count": 6`.
+
+**3. How I found the root cause**
+
+- `tests/test_playlists.py` comment: "Bug causes this to return 4."
+- Traced `GET /playlists/<id>/songs` → `playlist_service.get_playlist_songs()`.
+- Query joins `playlist_entries`, orders by `position` — correct.
+- Return line 66 used `songs[:-1]`, dropping the final element every time.
+
+**4. The root cause**
+
+`get_playlist_songs()` ran a correct ordered query but returned `songs[:-1]`, which always omits the last song. For N entries, the API returned N−1 songs. This is a display-layer slice bug, not a SQL or ordering bug.
+
+**5. Fix and side-effect check**
+
+- **Change:** `return [song.to_dict() for song in songs]` (removed `[:-1]`).
+- **Why it works:** Return list now matches query length.
+- **Verified:** `pytest tests/test_playlists.py` — 3/3 pass. Full suite: 13/13 pass. Empty playlist test still passes.
+
+---
+
+### Issue #4 — Missing notification when friend rates song
+
+**1. Issue number and title:** #4 — Missing notification when friend rates song (`notification_service.py`)
+
+**2. How I reproduced it**
+
+```bash
+# Before fix — seed data
+curl "http://10.88.191.102:5000/users/<nova_id>/notifications"
+# Only song_added_to_playlist present
+
+# After identifying pattern, isolated in Python:
+# rate_song(friend_id, song_id, 5) → sharer notifications stayed empty
+```
+
+Compared to working path: `add_to_playlist()` creates `song_added_to_playlist` when a friend adds your song.
+
+**3. How I found the root cause**
+
+- Issue brief + `GET /users/<id>/notifications` showed playlist-add notification but no rating notification.
+- Compared `add_to_playlist()` (calls `create_notification`) vs `rate_song()` (saved `Rating` only).
+- `routes/songs.py` → `rate_song()` — architectural omission, not a typo in notification text.
+
+**4. The root cause**
+
+`rate_song()` persisted the rating and returned, but never called `create_notification()` for the song's original sharer. `add_to_playlist()` already had the correct pattern: if the actor is not the sharer, notify `song.shared_by`.
+
+**5. Fix and side-effect check**
+
+- **Change:** After commit, if `song.shared_by != user_id`, call `create_notification(..., "song_rated", ...)`.
+- **Why it works:** Mirrors the working playlist-add path; sharer learns when someone rates their song.
+- **Verified:** Manual test — `rate_song` by friend creates one `song_rated` notification for sharer. Self-rating does not notify. Full `pytest tests/` — 13/13 pass (no regressions).
+
+```mermaid
+flowchart LR
+    A["rate_song() saves Rating"] --> B{"rater == sharer?"}
+    B -->|No| C["create_notification song_rated"]
+    B -->|Yes| D["no notification"]
+    C --> E["sharer sees notification"]
+```
+
+---
+
+## Git commit history (`bugfix/mixtape`)
+
+The project brief asks for a **screenshot** of this output attached to the Course Portal submission. The copy below is included for readability in `submission.md`; still take a screenshot of your terminal for the portal.
+
+```text
+$ git checkout bugfix/mixtape
+$ git log --oneline
+
+e6c2131 fix: notify song sharer when a friend rates their song
+110145c fix: return all playlist songs instead of slicing off the last one
+ca08670 fix: allow streak increment on Sunday after consecutive day
+b1018af docs: draft pre-fix submission from observation captures
+9901cc3 docs: add Mermaid diagrams for workflow and bug investigation
+2bf5010 docs: add pre-fix submission draft before bug fixes
+1e1215b feat: bind Flask dev server to all network interfaces
+6213062 codepath ai201 unit 5 projects ; 17K 2026-07-01 01:03:51.852849000 -0600 projects.md
+2dfdeaa Add .gitignore file and update README with setup instructions
+7b64551 initial commit
+```
+
+**Three `fix:` commits** (one per bug): `ca08670`, `110145c`, `e6c2131`.
+
+---
+
+## Optional demo walkthrough script (not required for submission)
+
+This project does **not** require a video demo. If you want to rehearse explaining your work aloud (study group, office hours, or portfolio), use this ~3-minute script:
+
+| Step | Say | Do |
+|------|-----|-----|
+| 1 | "Mixtape is a Flask API — routes call services, bugs live in services/." | Open `README.md` structure section |
+| 2 | "I reproduced bugs before fixing — pytest showed 3 failures." | `pytest tests/ -v` (or show `01-pytest-baseline.txt`) |
+| 3 | "Issue 1: streak should increment Sat→Sun; weekday guard blocked Sunday." | `pytest tests/test_streaks.py::test_streak_increments_on_sunday -v` |
+| 4 | "Issue 5: playlist query was right but return sliced off the last song." | `curl .../playlists/<id>/songs` — show count matches DB |
+| 5 | "Issue 4: rating saved but never notified the sharer — I matched add_to_playlist." | `POST .../rate` then `GET .../notifications` |
+| 6 | "One fix per commit on bugfix/mixtape." | `git log --oneline` |
+
+**Is `submission.md` alone enough?** Almost — the portal also wants your **GitHub fork link** (on `bugfix/mixtape`) and the **`git log` screenshot**. Everything else (codebase map, AI usage, RCAs) lives in `submission.md` in the repo root.
+
+---
